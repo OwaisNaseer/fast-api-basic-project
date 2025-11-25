@@ -18,7 +18,7 @@ class UserCreate(UserBase):
 
 class UserOut(UserBase):
     """Schema returned to clients (response). Includes id."""
-    id: int
+    id: str
 
     class Config:
-        orm_mode = True  # helpful when returning ORM objects later
+        from_attributes = True
