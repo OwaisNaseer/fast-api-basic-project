@@ -36,3 +36,35 @@ def health():
     In real apps you might return app metadata or a health-check payload.
     """
     return {"status": "ok", "app": "FastAPI Professional Skeleton (MongoDB)"}
+
+
+@app.get("/health/db")
+async def health_db():
+    """
+    Database health check endpoint.
+    Tests MongoDB connection and returns status.
+    """
+    from app.database.connection import get_database
+    from pymongo.errors import ServerSelectionTimeoutError, ConnectionFailure
+    
+    try:
+        db = get_database()
+        # Try a simple operation to verify connection
+        await db.command('ping')
+        return {
+            "status": "healthy",
+            "database": db.name,
+            "message": "MongoDB connection is working"
+        }
+    except (ServerSelectionTimeoutError, ConnectionFailure) as e:
+        return {
+            "status": "unhealthy",
+            "error": str(e),
+            "message": "Cannot connect to MongoDB. Please check your connection string, IP whitelist, and network settings."
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "error": str(e),
+            "message": "Database check failed"
+        }
