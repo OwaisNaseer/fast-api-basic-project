@@ -1,76 +1,159 @@
 # app/services/user_service.py
 """
 Service layer for User domain.
-- Implements in-memory CRUD operations and business logic.
-- This layer is the right place to add validation rules, hooks, or
-  to call repositories/DAOs once a DB is introduced.
+- Implements MongoDB CRUD operations and business logic.
 - Service functions raise HTTPException so routers can stay thin.
 """
 
 from typing import List
 from fastapi import HTTPException, status
+from bson import ObjectId
+from bson.errors import InvalidId
+from pymongo.errors import ServerSelectionTimeoutError, ConnectionFailure
 
 from app.models.user import User
 from app.schemas.user_schema import UserCreate
+from app.database.connection import get_database
 
-# In-memory data store and id counter.
-_users: List[User] = []
-_user_id_counter = 1
 
-def _get_next_id() -> int:
-    global _user_id_counter
-    value = _user_id_counter
-    _user_id_counter += 1
-    return value
-
-def create_user(payload: UserCreate) -> User:
-    """
-    Create a new User domain object and append to in-memory store.
-    In a DB-backed app, this would call repository/session.add(...) and commit.
-    """
-    # Example: prevent duplicate emails (simple business rule)
-    for u in _users:
-        if u.email == payload.email:
+async def create_user(payload: UserCreate) -> User:
+    """Create a new user in MongoDB."""
+    try:
+        db = get_database()
+    except RuntimeError as e:
+        # Database not initialized
+        print(f"Database not initialized error: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database service is currently unavailable. Please try again later."
+        )
+    except Exception as e:
+        print(f"Unexpected error getting database: {type(e).__name__}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database service is currently unavailable. Please try again later."
+        )
+    
+    try:
+        existing = await db.users.find_one({"email": payload.email})
+        if existing:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email already exists")
+        result = await db.users.insert_one({"name": payload.name, "email": payload.email})
+        user_doc = await db.users.find_one({"_id": result.inserted_id})
+        return User.from_dict(user_doc)
+    except (ServerSelectionTimeoutError, ConnectionFailure) as e:
+        print(f"MongoDB connection error: {type(e).__name__}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database service is currently unavailable. Please try again later."
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        # Log the actual error for debugging
+        print(f"Error creating user: {type(e).__name__}: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"An error occurred while creating the user: {str(e)}"
+        )
 
-    user = User(id=_get_next_id(), name=payload.name, email=payload.email)
-    _users.append(user)
-    return user
 
-def get_users() -> List[User]:
-    """Return all users."""
-    return _users
+async def get_users() -> List[User]:
+    """Get all users from MongoDB."""
+    try:
+        db = get_database()
+        users = []
+        async for doc in db.users.find():
+            users.append(User.from_dict(doc))
+        return users
+    except (ServerSelectionTimeoutError, ConnectionFailure) as e:
+        # If database connection fails, return empty list instead of crashing
+        # This allows the API to work even if MongoDB is temporarily unavailable
+        print(f"Warning: Could not fetch users from database: {e}")
+        return []
+    except Exception as e:
+        # Catch any other unexpected errors and return empty list
+        print(f"Warning: Unexpected error fetching users: {e}")
+        return []
 
-def get_user(user_id: int) -> User:
-    """Find user by id or raise 404."""
-    for u in _users:
-        if u.id == user_id:
-            return u
-    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
 
-def update_user(user_id: int, payload: UserCreate) -> User:
-    """
-    Update existing user.
-    - For now we replace the name & email.
-    - Add checks as necessary.
-    """
-    for idx, u in enumerate(_users):
-        if u.id == user_id:
-            # Prevent email conflicts (optional, demonstrates business logic)
-            for other in _users:
-                if other.id != user_id and other.email == payload.email:
-                    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email already in use")
+async def get_user(user_id: str) -> User:
+    """Get user by ID from MongoDB."""
+    try:
+        db = get_database()
+        try:
+            user_doc = await db.users.find_one({"_id": ObjectId(user_id)})
+            if not user_doc:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+            return User.from_dict(user_doc)
+        except InvalidId:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid user ID format")
+    except (ServerSelectionTimeoutError, ConnectionFailure) as e:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database service is currently unavailable. Please try again later."
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"An error occurred while fetching the user: {str(e)}"
+        )
 
-            u.name = payload.name
-            u.email = payload.email
-            _users[idx] = u
-            return u
-    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
 
-def delete_user(user_id: int) -> dict:
-    """Delete user if exists; otherwise raise 404."""
-    for u in _users:
-        if u.id == user_id:
-            _users.remove(u)
+async def update_user(user_id: str, payload: UserCreate) -> User:
+    """Update user in MongoDB."""
+    try:
+        db = get_database()
+        try:
+            existing = await db.users.find_one({"_id": ObjectId(user_id)})
+            if not existing:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+            email_check = await db.users.find_one({"email": payload.email, "_id": {"$ne": ObjectId(user_id)}})
+            if email_check:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email already in use")
+            await db.users.update_one({"_id": ObjectId(user_id)}, {"$set": {"name": payload.name, "email": payload.email}})
+            updated_doc = await db.users.find_one({"_id": ObjectId(user_id)})
+            return User.from_dict(updated_doc)
+        except InvalidId:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid user ID format")
+    except (ServerSelectionTimeoutError, ConnectionFailure) as e:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database service is currently unavailable. Please try again later."
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"An error occurred while updating the user: {str(e)}"
+        )
+
+
+async def delete_user(user_id: str) -> dict:
+    """Delete user from MongoDB."""
+    try:
+        db = get_database()
+        try:
+            result = await db.users.delete_one({"_id": ObjectId(user_id)})
+            if result.deleted_count == 0:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
             return {"message": "User deleted successfully"}
-    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+        except InvalidId:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid user ID format")
+    except (ServerSelectionTimeoutError, ConnectionFailure) as e:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database service is currently unavailable. Please try again later."
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"An error occurred while deleting the user: {str(e)}"
+        )
