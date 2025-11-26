@@ -1,16 +1,28 @@
 # app/core/config.py
 """
 Configuration module.
-- For now this holds simple constants useful for the app.
-- Later this module can read environment variables, handle secrets, or
-  provide BaseSettings (Pydantic) for typed config.
+- Loads environment variables from .env file
+- Provides type-safe configuration using Pydantic Settings
 """
 
-from typing import Final
+from pydantic_settings import BaseSettings, SettingsConfigDict
+from functools import lru_cache
 
-APP_NAME: Final = "FastAPI Professional Skeleton"
-APP_VERSION: Final = "0.1.0"
 
-# Example: default pagination limits, placeholder secret, etc.
-DEFAULT_PAGE_SIZE: Final = 10
-FAKE_SECRET_KEY: Final = "change-me-in-production"
+class Settings(BaseSettings):
+    """Application settings loaded from environment variables."""
+    
+    mongodb_url: str
+    mongodb_db_name: str = "fastapi_db"
+    
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False
+    )
+
+
+@lru_cache()
+def get_settings() -> Settings:
+    """Get cached settings instance."""
+    return Settings()
